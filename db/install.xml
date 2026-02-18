@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<XMLDB PATH="local/csv_user_sync/db" VERSION="2026021300" COMMENT="XMLDB file for local_csv_user_sync"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="../../../lib/xmldb/xmldb.xsd">
+    <TABLES>
+        <TABLE NAME="local_cus_log" COMMENT="Execution log for CSV user sync runs">
+            <FIELDS>
+                <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true"/>
+                <FIELD NAME="runid" TYPE="char" LENGTH="32" NOTNULL="true" DEFAULT=""/>
+                <FIELD NAME="level" TYPE="char" LENGTH="10" NOTNULL="true" DEFAULT="info"/>
+                <FIELD NAME="rownum" TYPE="int" LENGTH="10" NOTNULL="false" DEFAULT="0"/>
+                <FIELD NAME="userid" TYPE="int" LENGTH="10" NOTNULL="false" DEFAULT="0"/>
+                <FIELD NAME="username" TYPE="char" LENGTH="100" NOTNULL="false" DEFAULT=""/>
+                <FIELD NAME="message" TYPE="text" NOTNULL="true"/>
+                <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0"/>
+            </FIELDS>
+            <KEYS>
+                <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
+                <KEY NAME="userid_fk" TYPE="foreign" FIELDS="userid" REFTABLE="user" REFFIELDS="id"/>
+            </KEYS>
+            <INDEXES>
+                <INDEX NAME="runid_ix" UNIQUE="false" FIELDS="runid"/>
+                <INDEX NAME="userid_ix" UNIQUE="false" FIELDS="userid"/>
+                <INDEX NAME="timecreated_ix" UNIQUE="false" FIELDS="timecreated"/>
+            </INDEXES>
+        </TABLE>
+    </TABLES>
+</XMLDB>
+
