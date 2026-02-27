@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8" ?>
-<XMLDB PATH="local/csv_user_sync/db" VERSION="2026021300" COMMENT="XMLDB file for local_csv_user_sync"
+<XMLDB PATH="local/csv_user_sync/db" VERSION="2026022600" COMMENT="XMLDB file for local_csv_user_sync"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
     xsi:noNamespaceSchemaLocation="../../../lib/xmldb/xmldb.xsd">
     <TABLES>
-        <TABLE NAME="local_cus_log" COMMENT="Execution log for CSV user sync runs">
+        <TABLE NAME="local_csv_user_sync_log" COMMENT="Execution log for CSV user sync runs">
             <FIELDS>
                 <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true"/>
                 <FIELD NAME="runid" TYPE="char" LENGTH="32" NOTNULL="true" DEFAULT=""/>
@@ -26,4 +26,3 @@
         </TABLE>
     </TABLES>
 </XMLDB>
-

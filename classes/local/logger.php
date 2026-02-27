@@ -63,7 +63,7 @@ class logger {
         $this->runid = $runid;
         $this->detailedlog = $detailedlog;
         $this->dryrun = $dryrun;
-        $this->tableexists = $DB->get_manager()->table_exists('local_cus_log');
+        $this->tableexists = $DB->get_manager()->table_exists('local_csv_user_sync_log');
     }
 
     /**
@@ -158,7 +158,7 @@ class logger {
         ];
 
         try {
-            $DB->insert_record('local_cus_log', $record);
+            $DB->insert_record('local_csv_user_sync_log', $record);
         } catch (\Throwable $e) {
             // Prevent repeated DB failures in the same run.
             $this->tableexists = false;

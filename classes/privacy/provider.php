@@ -52,15 +52,15 @@ class provider implements
     public static function get_metadata(collection $collection): collection {
         $collection->add_subsystem_link('core_files', [], 'privacy:metadata:core_files');
 
-        $collection->add_database_table('local_cus_log', [
-            'userid' => 'privacy:metadata:local_cus_log:userid',
-            'username' => 'privacy:metadata:local_cus_log:username',
-            'runid' => 'privacy:metadata:local_cus_log:runid',
-            'level' => 'privacy:metadata:local_cus_log:level',
-            'rownum' => 'privacy:metadata:local_cus_log:rownum',
-            'message' => 'privacy:metadata:local_cus_log:message',
-            'timecreated' => 'privacy:metadata:local_cus_log:timecreated',
-        ], 'privacy:metadata:local_cus_log');
+        $collection->add_database_table('local_csv_user_sync_log', [
+            'userid' => 'privacy:metadata:local_csv_user_sync_log:userid',
+            'username' => 'privacy:metadata:local_csv_user_sync_log:username',
+            'runid' => 'privacy:metadata:local_csv_user_sync_log:runid',
+            'level' => 'privacy:metadata:local_csv_user_sync_log:level',
+            'rownum' => 'privacy:metadata:local_csv_user_sync_log:rownum',
+            'message' => 'privacy:metadata:local_csv_user_sync_log:message',
+            'timecreated' => 'privacy:metadata:local_csv_user_sync_log:timecreated',
+        ], 'privacy:metadata:local_csv_user_sync_log');
 
         return $collection;
     }
@@ -75,7 +75,7 @@ class provider implements
         global $DB;
 
         $contextlist = new contextlist();
-        if ($DB->record_exists('local_cus_log', ['userid' => $userid])) {
+        if ($DB->record_exists('local_csv_user_sync_log', ['userid' => $userid])) {
             $contextlist->add_context(context_system::instance()->id);
         }
 
@@ -101,7 +101,7 @@ class provider implements
             return;
         }
 
-        $records = $DB->get_records('local_cus_log', ['userid' => $userid], 'timecreated ASC');
+        $records = $DB->get_records('local_csv_user_sync_log', ['userid' => $userid], 'timecreated ASC');
         if (!$records) {
             return;
         }
@@ -136,7 +136,7 @@ class provider implements
             return;
         }
 
-        $DB->delete_records_select('local_cus_log', 'userid IS NOT NULL AND userid > 0');
+        $DB->delete_records_select('local_csv_user_sync_log', 'userid IS NOT NULL AND userid > 0');
     }
 
     /**
@@ -149,7 +149,7 @@ class provider implements
         global $DB;
 
         $userid = $contextlist->get_user()->id;
-        $DB->delete_records('local_cus_log', ['userid' => $userid]);
+        $DB->delete_records('local_csv_user_sync_log', ['userid' => $userid]);
     }
 
     /**
@@ -164,7 +164,7 @@ class provider implements
         }
 
         $sql = "SELECT userid
-                  FROM {local_cus_log}
+                  FROM {local_csv_user_sync_log}
                  WHERE userid IS NOT NULL
                    AND userid > 0";
         $userlist->add_from_sql('userid', $sql, []);
@@ -188,6 +188,6 @@ class provider implements
             return;
         }
 
-        $DB->delete_records_list('local_cus_log', 'userid', $userids);
+        $DB->delete_records_list('local_csv_user_sync_log', 'userid', $userids);
     }
 }

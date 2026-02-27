@@ -20,7 +20,7 @@ It supports user creation and updates, enrolment creation/update/removal, dry-ru
 - Provides downloadable CSV template (including custom profile fields).
 - Includes dry-run mode (simulate actions without writing data).
 - Uses task-level locking to prevent concurrent sync runs.
-- Logs to both `mtrace` and plugin DB table (`local_cus_log`).
+- Logs to both `mtrace` and plugin DB table (`local_csv_user_sync_log`).
 - Includes GDPR privacy provider for exported/deleted user-related log data.
 
 ## Requirements
@@ -182,11 +182,11 @@ If a manual enrolment instance is missing on a target course, the plugin creates
 Logs are written to:
 
 - `mtrace` output
-- `local_cus_log` table (`runid`, level, rownum, userid, username, message, timecreated)
+- `local_csv_user_sync_log` table (`runid`, level, rownum, userid, username, message, timecreated)
 
 Privacy support:
 
-- Plugin declares metadata and supports export/deletion for user-related records in `local_cus_log`.
+- Plugin declares metadata and supports export/deletion for user-related records in `local_csv_user_sync_log`.
 
 ## Scheduled Task
 
@@ -222,4 +222,3 @@ Common checks:
 - Ensure `course_shortname` and `role_shortname` are both present for enrolment imports.
 - Ensure role shortnames and course shortnames exist in Moodle.
 - Ensure uploaded file still exists in plugin file storage.
-

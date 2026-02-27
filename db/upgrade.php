@@ -15,7 +15,7 @@
 // along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
 /**
- * Version metadata for local_csv_user_sync.
+ * Upgrade script for local_csv_user_sync.
  *
  * @package     local_csv_user_sync
  * @copyright   2026 mdlbox.com
@@ -24,8 +24,27 @@
 
 defined('MOODLE_INTERNAL') || die();
 
-$plugin->version   = 2026022600;
-$plugin->requires  = 2024100700; // Moodle 4.5 branch.
-$plugin->component = 'local_csv_user_sync';
-$plugin->maturity  = MATURITY_ALPHA;
-$plugin->release   = '0.1.0';
+/**
+ * Executes plugin upgrade steps.
+ *
+ * @param int $oldversion
+ * @return bool
+ */
+function xmldb_local_csv_user_sync_upgrade(int $oldversion): bool {
+    global $DB;
+
+    $dbman = $DB->get_manager();
+
+    if ($oldversion < 2026022600) {
+        $oldtable = new xmldb_table('local_cus_log');
+        $newtable = new xmldb_table('local_csv_user_sync_log');
+
+        if ($dbman->table_exists($oldtable) && !$dbman->table_exists($newtable)) {
+            $dbman->rename_table($oldtable, 'local_csv_user_sync_log');
+        }
+
+        upgrade_plugin_savepoint(true, 2026022600, 'local', 'csv_user_sync');
+    }
+
+    return true;
+}
