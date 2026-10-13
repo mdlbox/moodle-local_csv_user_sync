@@ -24,8 +24,8 @@
 
 defined('MOODLE_INTERNAL') || die();
 
-$plugin->version   = 2026022600;
+$plugin->version   = 2026101300;
 $plugin->requires  = 2024100700; // Moodle 4.5 branch.
 $plugin->component = 'local_csv_user_sync';
 $plugin->maturity  = MATURITY_ALPHA;
-$plugin->release   = '0.1.0';
+$plugin->release   = '0.2.0';

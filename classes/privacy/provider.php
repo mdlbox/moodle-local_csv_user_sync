@@ -40,8 +40,8 @@ use core_privacy\local\request\writer;
  * GDPR provider implementation.
  */
 class provider implements
-    \core_privacy\local\request\core_userlist_provider,
     \core_privacy\local\metadata\provider,
+    \core_privacy\local\request\core_userlist_provider,
     \core_privacy\local\request\plugin\provider {
     /**
      * Describe stored personal data.
@@ -61,6 +61,11 @@ class provider implements
             'message' => 'privacy:metadata:local_csv_user_sync_log:message',
             'timecreated' => 'privacy:metadata:local_csv_user_sync_log:timecreated',
         ], 'privacy:metadata:local_csv_user_sync_log');
+
+        $collection->add_external_location_link('conflictnotification', [
+            'username' => 'privacy:metadata:conflictnotification:username',
+            'email' => 'privacy:metadata:conflictnotification:email',
+        ], 'privacy:metadata:conflictnotification');
 
         return $collection;
     }
