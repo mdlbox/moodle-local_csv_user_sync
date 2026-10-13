@@ -102,6 +102,19 @@ class logger {
     }
 
     /**
+     * Writes a warning line.
+     *
+     * @param string $message
+     * @param int|null $rownum
+     * @param int|null $userid
+     * @param string|null $username
+     * @return void
+     */
+    public function warning(string $message, ?int $rownum = null, ?int $userid = null, ?string $username = null): void {
+        $this->write('warning', $message, $rownum, $userid, $username);
+    }
+
+    /**
      * Writes an error line.
      *
      * @param string $message

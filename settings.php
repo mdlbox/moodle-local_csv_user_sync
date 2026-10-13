@@ -26,6 +26,8 @@ defined('MOODLE_INTERNAL') || die();
 
 require_once(__DIR__ . '/classes/local/admin_setting_csvpath.php');
 require_once(__DIR__ . '/classes/local/admin_setting_csvstoredfile.php');
+require_once(__DIR__ . '/classes/local/admin_setting_sourcecourse.php');
+require_once(__DIR__ . '/classes/local/admin_setting_sourcefolders.php');
 
 if ($hassiteconfig) {
     $settings = new admin_settingpage(
@@ -58,6 +60,31 @@ if ($hassiteconfig) {
             'subdirs' => 0,
             'accepted_types' => ['.csv', '.txt'],
         ]
+    ));
+
+    $settings->add(new admin_setting_heading(
+        'local_csv_user_sync/foldersection',
+        get_string('settings:foldersection', 'local_csv_user_sync'),
+        get_string('settings:foldersection_desc', 'local_csv_user_sync')
+    ));
+
+    $settings->add(new \local_csv_user_sync\local\admin_setting_sourcecourse(
+        'local_csv_user_sync/sourcecourseid',
+        get_string('settings:sourcecourse', 'local_csv_user_sync'),
+        get_string('settings:sourcecourse_desc', 'local_csv_user_sync')
+    ));
+
+    // Choices are loaded lazily: only when the setting is displayed, searched or saved.
+    $settings->add(new \local_csv_user_sync\local\admin_setting_sourcefolders(
+        'local_csv_user_sync/sourcefolders',
+        get_string('settings:sourcefolders', 'local_csv_user_sync'),
+        get_string('settings:sourcefolders_desc', 'local_csv_user_sync')
+    ));
+
+    $settings->add(new admin_setting_heading(
+        'local_csv_user_sync/parsersection',
+        get_string('settings:parsersection', 'local_csv_user_sync'),
+        ''
     ));
 
     $settings->add(new admin_setting_configselect(
@@ -147,6 +174,45 @@ if ($hassiteconfig) {
         'local_csv_user_sync/syncsection',
         get_string('settings:syncsection', 'local_csv_user_sync'),
         ''
+    ));
+
+    $settings->add(new admin_setting_configselect(
+        'local_csv_user_sync/matchmode',
+        get_string('settings:matchmode', 'local_csv_user_sync'),
+        get_string('settings:matchmode_desc', 'local_csv_user_sync'),
+        \local_csv_user_sync\local\user_sync::MATCH_USERNAME_EMAIL,
+        [
+            \local_csv_user_sync\local\user_sync::MATCH_USERNAME_EMAIL =>
+                get_string('settings:matchmode_usernameemail', 'local_csv_user_sync'),
+            \local_csv_user_sync\local\user_sync::MATCH_USERNAME =>
+                get_string('settings:matchmode_username', 'local_csv_user_sync'),
+        ]
+    ));
+
+    $settings->add(new admin_setting_configselect(
+        'local_csv_user_sync/emptyvalues',
+        get_string('settings:emptyvalues', 'local_csv_user_sync'),
+        get_string('settings:emptyvalues_desc', 'local_csv_user_sync'),
+        \local_csv_user_sync\local\user_sync::EMPTY_IGNORE,
+        [
+            \local_csv_user_sync\local\user_sync::EMPTY_IGNORE => get_string('settings:emptyvalues_ignore', 'local_csv_user_sync'),
+            \local_csv_user_sync\local\user_sync::EMPTY_CLEAR => get_string('settings:emptyvalues_clear', 'local_csv_user_sync'),
+        ]
+    ));
+
+    $settings->add(new admin_setting_pickroles(
+        'local_csv_user_sync/allowedroles',
+        get_string('settings:allowedroles', 'local_csv_user_sync'),
+        get_string('settings:allowedroles_desc', 'local_csv_user_sync'),
+        \local_csv_user_sync\local\enrol_sync::DEFAULT_ROLE_ARCHETYPES
+    ));
+
+    $settings->add(new admin_setting_configtext(
+        'local_csv_user_sync/conflictemail',
+        get_string('settings:conflictemail', 'local_csv_user_sync'),
+        get_string('settings:conflictemail_desc', 'local_csv_user_sync'),
+        '',
+        PARAM_EMAIL
     ));
 
     $settings->add(new admin_setting_configcheckbox(

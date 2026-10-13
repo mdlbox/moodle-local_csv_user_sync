@@ -52,13 +52,14 @@ class csv_reader {
      * @param string $filepath
      * @param string $delimiter
      * @param string $encoding
-     * @param bool $sanitizeformulacells
+     * @param bool $sanitizeformulacells prefix values starting with =, +, - or @ with an apostrophe (export use only:
+     *        on import it would corrupt data such as phone numbers "+41 ...")
      */
     public function __construct(
         string $filepath,
         string $delimiter = ';',
         string $encoding = 'UTF-8',
-        bool $sanitizeformulacells = true
+        bool $sanitizeformulacells = false
     ) {
         $this->filepath = $filepath;
         $this->delimiter = $delimiter;

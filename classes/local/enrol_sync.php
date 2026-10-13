@@ -34,6 +34,9 @@ use stdClass;
  * Creates and updates manual course enrolments from CSV rows.
  */
 class enrol_sync {
+    /** @var string[] Role archetypes a CSV may assign by default. */
+    public const DEFAULT_ROLE_ARCHETYPES = ['student', 'teacher', 'editingteacher'];
+
     /** @var logger */
     private readonly logger $logger;
 
@@ -48,6 +51,9 @@ class enrol_sync {
 
     /** @var array<int,stdClass|null> */
     private array $instancecache = [];
+
+    /** @var int[]|null Ids of roles assignable in course context, loaded on first use. */
+    private ?array $courseroleids = null;
 
     /**
      * Constructor.
@@ -156,6 +162,14 @@ class enrol_sync {
             $role = $this->get_role($roleshortname);
             if (!$role) {
                 $this->logger->error(get_string('error:unknownrole', 'local_csv_user_sync', $roleshortname), $rownum, $userid);
+                return ['status' => 'error'];
+            }
+            if (!$this->is_course_role($role)) {
+                $this->logger->error(
+                    get_string('error:rolenotcourselevel', 'local_csv_user_sync', $roleshortname),
+                    $rownum,
+                    $userid
+                );
                 return ['status' => 'error'];
             }
         }
@@ -467,6 +481,44 @@ class enrol_sync {
         $role = $DB->get_record('role', ['shortname' => $shortname], '*', IGNORE_MISSING);
         $this->rolecache[$cachekey] = $role ?: null;
         return $this->rolecache[$cachekey];
+    }
+
+    /**
+     * Returns true when the role is allowed by the plugin settings and can be assigned in course context.
+     *
+     * @param stdClass $role
+     * @return bool
+     */
+    private function is_course_role(stdClass $role): bool {
+        if ($this->courseroleids === null) {
+            $courseroles = array_map('intval', array_values(get_roles_for_contextlevels(CONTEXT_COURSE)));
+            $this->courseroleids = array_values(array_intersect($courseroles, self::get_allowed_roleids($this->config)));
+        }
+
+        return in_array((int)$role->id, $this->courseroleids, true);
+    }
+
+    /**
+     * Returns the ids of the roles a CSV may assign.
+     *
+     * Uses local_csv_user_sync/allowedroles; until it is saved, the student, teacher and editingteacher archetypes.
+     *
+     * @param array<string,mixed> $config
+     * @return int[]
+     */
+    public static function get_allowed_roleids(array $config): array {
+        $setting = $config['allowedroles'] ?? null;
+        if ($setting !== null) {
+            return array_values(array_filter(array_map('intval', explode(',', (string)$setting))));
+        }
+
+        $roleids = [];
+        foreach (self::DEFAULT_ROLE_ARCHETYPES as $archetype) {
+            foreach (get_archetype_roles($archetype) as $role) {
+                $roleids[] = (int)$role->id;
+            }
+        }
+        return $roleids;
     }
 
     /**

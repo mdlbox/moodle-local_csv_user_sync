@@ -29,13 +29,18 @@ namespace local_csv_user_sync\task;
 use context_system;
 use core\lock\lock;
 use core\lock\lock_config;
+use local_csv_user_sync\local\conflict_notifier;
 use local_csv_user_sync\local\csv_reader;
 use local_csv_user_sync\local\enrol_sync;
+use local_csv_user_sync\local\folder_source;
 use local_csv_user_sync\local\logger;
 use local_csv_user_sync\local\user_sync;
 
 /**
  * Scheduled task that runs CSV user synchronization.
+ *
+ * Sources are processed sequentially: first the legacy source (file path or uploaded file), then every
+ * configured Folder activity in course page order. A failing source does not stop the following ones.
  */
 class sync_task extends \core\task\scheduled_task {
     /** @var string Moodle file area used for uploaded CSV source file. */
@@ -43,6 +48,9 @@ class sync_task extends \core\task\scheduled_task {
 
     /** @var int Moodle file itemid used for uploaded CSV source file. */
     private const CSV_ITEMID = 0;
+
+    /** @var string[] Counter names. */
+    private const COUNTERS = ['rows', 'userscreated', 'usersupdated', 'enrolmentscreated', 'enrolmentsupdated', 'errors'];
 
     /**
      * Returns the task name.
@@ -70,34 +78,196 @@ class sync_task extends \core\task\scheduled_task {
         $dryrun = !empty($config->dryrun);
         $runid = substr(hash('sha256', microtime(true) . ':' . random_int(1000, 9999)), 0, 16);
         $logger = new logger($runid, !empty($config->detailedlog), $dryrun);
+        $failedsources = [];
+
+        try {
+            $logger->info(get_string('task:start', 'local_csv_user_sync', $dryrun ? get_string('yes') : get_string('no')));
+
+            $sources = $this->collect_sources($config, $logger);
+            if (empty($sources)) {
+                return;
+            }
+
+            $defaultauth = trim((string)($config->defaultauth ?? 'manual'));
+            $usersync = new user_sync($logger, [
+                'dryrun' => $dryrun,
+                'updateonlychanged' => !isset($config->updateonlychanged) || !empty($config->updateonlychanged),
+                'defaultauth' => $defaultauth !== '' ? $defaultauth : 'manual',
+                'sendemail' => !empty($config->sendemail),
+                'emailtemplate' => (string)($config->emailtemplate ?? ''),
+                'matchmode' => (string)($config->matchmode ?? user_sync::MATCH_USERNAME_EMAIL),
+                'emptyvalues' => (string)($config->emptyvalues ?? user_sync::EMPTY_IGNORE),
+            ]);
+            $enrolsync = new enrol_sync($logger, [
+                'dryrun' => $dryrun,
+                'allowedroles' => $config->allowedroles ?? null,
+            ]);
+            $notifier = new conflict_notifier($logger, (string)($config->conflictemail ?? ''), $dryrun);
+
+            $totals = $this->new_counters();
+            $total = count($sources);
+            foreach (array_values($sources) as $index => $source) {
+                $logger->info(get_string('task:sourcestart', 'local_csv_user_sync', (object)[
+                    'index' => $index + 1,
+                    'total' => $total,
+                    'source' => $source['label'],
+                ]));
+
+                $starttime = microtime(true);
+                $counters = $this->new_counters();
+                try {
+                    $this->process_source($source, $config, $logger, $usersync, $enrolsync, $notifier, $counters);
+                } catch (\Throwable $e) {
+                    $counters->errors++;
+                    $failedsources[] = $source['label'];
+                    $logger->error(get_string('task:sourcefatal', 'local_csv_user_sync', (object)[
+                        'source' => $source['label'],
+                        'message' => $this->readable_exception_message($e),
+                    ]));
+                }
+
+                foreach (self::COUNTERS as $name) {
+                    $totals->{$name} += $counters->{$name};
+                }
+                $counters->source = $source['label'];
+                $counters->duration = format_float(microtime(true) - $starttime, 2);
+                $logger->info(get_string('task:sourcesummary', 'local_csv_user_sync', $counters));
+            }
+
+            $totals->sources = $total;
+            $logger->info(get_string('task:summary', 'local_csv_user_sync', $totals));
+            $notifier->send();
+        } catch (\Throwable $e) {
+            $logger->error(get_string('task:fatal', 'local_csv_user_sync', $this->readable_exception_message($e)));
+            throw $e;
+        } finally {
+            $this->release_lock($lock);
+        }
+
+        if (!empty($failedsources)) {
+            // Report the failure to the task manager once every source has been attempted.
+            throw new \moodle_exception('task:sourcesfailed', 'local_csv_user_sync', '', implode(', ', $failedsources));
+        }
+    }
+
+    /**
+     * Collect configured CSV sources, in processing order.
+     *
+     * The legacy source accepts exactly one of local_csv_user_sync/csvpath and local_csv_user_sync/csvstoredfile.
+     * Folder sources are added after it, in course page order.
+     *
+     * @param \stdClass $config plugin config
+     * @param logger $logger logger instance
+     * @return array<int,array{type:string,label:string,path?:string,file?:\stored_file,cm?:\cm_info}>
+     */
+    private function collect_sources(\stdClass $config, logger $logger): array {
+        $csvpath = trim((string)($config->csvpath ?? ''));
+        $storedfilepath = trim((string)($config->csvstoredfile ?? ''));
+
+        if ($csvpath !== '' && $storedfilepath !== '') {
+            $logger->error(get_string('error:csvsourceconflict', 'local_csv_user_sync'));
+            return [];
+        }
+
+        $sources = [];
+        if ($csvpath !== '') {
+            $sources[] = [
+                'type' => 'path',
+                'label' => get_string('task:sourcepath', 'local_csv_user_sync', basename($csvpath)),
+                'path' => $csvpath,
+            ];
+        } else if ($storedfilepath !== '') {
+            $storedfile = $this->get_stored_csv_file($storedfilepath);
+            if ($storedfile === null) {
+                $logger->error(get_string('error:csvuploadnotfound', 'local_csv_user_sync'));
+            } else {
+                $sources[] = [
+                    'type' => 'upload',
+                    'label' => get_string('task:sourceupload', 'local_csv_user_sync', $storedfile->get_filename()),
+                    'file' => $storedfile,
+                ];
+            }
+        }
+
+        foreach (folder_source::resolve_folders($config, $logger) as $cm) {
+            $sources[] = [
+                'type' => 'folder',
+                'label' => get_string('task:sourcefolder', 'local_csv_user_sync', (object)[
+                    'name' => format_string($cm->name, true, ['context' => $cm->context, 'escape' => false]),
+                    'cmid' => (int)$cm->id,
+                ]),
+                'cm' => $cm,
+            ];
+        }
+
+        if (empty($sources) && $csvpath === '' && $storedfilepath === '' && !folder_source::is_configured($config)) {
+            $logger->error(get_string('error:csvsourcemissing', 'local_csv_user_sync'));
+        }
+
+        return $sources;
+    }
+
+    /**
+     * Process one CSV source with the shared synchronizers.
+     *
+     * @param array $source source descriptor from collect_sources()
+     * @param \stdClass $config plugin config
+     * @param logger $logger
+     * @param user_sync $usersync
+     * @param enrol_sync $enrolsync
+     * @param conflict_notifier $notifier
+     * @param \stdClass $counters counters for this source, updated in place
+     * @return void
+     */
+    private function process_source(
+        array $source,
+        \stdClass $config,
+        logger $logger,
+        user_sync $usersync,
+        enrol_sync $enrolsync,
+        conflict_notifier $notifier,
+        \stdClass $counters
+    ): void {
+        $dryrun = !empty($config->dryrun);
         $tempcsvpath = null;
 
         try {
-            $delimiter = (string)($config->delimiter ?? ';');
-            $encoding = (string)($config->encoding ?? 'UTF-8');
-            $updateonlychanged = !isset($config->updateonlychanged) || !empty($config->updateonlychanged);
-            $defaultauth = trim((string)($config->defaultauth ?? 'manual'));
-            if ($defaultauth === '') {
-                $defaultauth = 'manual';
+            if ($source['type'] === 'path') {
+                $csvpath = $source['path'];
+            } else {
+                $storedfile = $source['file'] ?? null;
+                if ($source['type'] === 'folder') {
+                    if (folder_source::is_exposed($source['cm'])) {
+                        $logger->warning(get_string('warning:folderexposed', 'local_csv_user_sync', $source['label']));
+                    }
+                    $rejected = false;
+                    $storedfile = folder_source::get_csv_file($source['cm'], $logger, $rejected);
+                    if ($storedfile === null) {
+                        if ($rejected) {
+                            $counters->errors++;
+                        }
+                        return;
+                    }
+                    $logger->info(get_string('task:sourcefile', 'local_csv_user_sync', $storedfile->get_filename()));
+                }
+
+                $tempcsvpath = $storedfile->copy_content_to_temp('local_csv_user_sync', 'csvsync_');
+                if ($tempcsvpath === false || !is_file($tempcsvpath) || !is_readable($tempcsvpath)) {
+                    $tempcsvpath = null;
+                    $counters->errors++;
+                    $logger->error(get_string('error:csvpathnotreadable', 'local_csv_user_sync', $storedfile->get_filename()));
+                    return;
+                }
+                $csvpath = $tempcsvpath;
             }
-            $emailtemplate = (string)($config->emailtemplate ?? '');
-            $sendemail = !empty($config->sendemail);
 
-            $logger->info(get_string('task:start', 'local_csv_user_sync', $dryrun ? get_string('yes') : get_string('no')));
-
-            $source = $this->resolve_csv_source($config, $logger);
-            if ($source === null) {
-                return;
-            }
-            $csvpath = $source['filepath'];
-            $tempcsvpath = $source['temppath'];
-
-            $reader = new csv_reader($csvpath, $delimiter, $encoding, true);
+            $reader = new csv_reader($csvpath, (string)($config->delimiter ?? ';'), (string)($config->encoding ?? 'UTF-8'), false);
             $validationerrors = $reader->validate_file();
             foreach ($validationerrors as $error) {
                 $logger->error($error);
             }
             if (!empty($validationerrors)) {
+                $counters->errors++;
                 return;
             }
             $headers = $reader->get_headers();
@@ -106,28 +276,9 @@ class sync_task extends \core\task\scheduled_task {
                 $logger->error($error);
             }
             if (!empty($headererrors)) {
+                $counters->errors++;
                 return;
             }
-
-            $usersync = new user_sync($logger, [
-                'dryrun' => $dryrun,
-                'updateonlychanged' => $updateonlychanged,
-                'defaultauth' => $defaultauth,
-                'sendemail' => $sendemail,
-                'emailtemplate' => $emailtemplate,
-            ]);
-            $enrolsync = new enrol_sync($logger, [
-                'dryrun' => $dryrun,
-            ]);
-
-            $counters = (object)[
-                'rows' => 0,
-                'userscreated' => 0,
-                'usersupdated' => 0,
-                'enrolmentscreated' => 0,
-                'enrolmentsupdated' => 0,
-                'errors' => 0,
-            ];
 
             foreach ($reader->get_rows() as $entry) {
                 $counters->rows++;
@@ -136,6 +287,15 @@ class sync_task extends \core\task\scheduled_task {
 
                 try {
                     $userresult = $usersync->sync($row, $rownum);
+                    if (!empty($userresult['conflict'])) {
+                        $notifier->add(
+                            $source['label'],
+                            $rownum,
+                            $userresult['conflict']['username'],
+                            $userresult['conflict']['email'],
+                            $userresult['conflict']['existing']
+                        );
+                    }
                     if ($userresult['status'] === 'error') {
                         $counters->errors++;
                         continue;
@@ -179,67 +339,20 @@ class sync_task extends \core\task\scheduled_task {
                     );
                 }
             }
-
-            $logger->info(get_string('task:summary', 'local_csv_user_sync', $counters));
-        } catch (\Throwable $e) {
-            $logger->error(get_string('task:fatal', 'local_csv_user_sync', $this->readable_exception_message($e)));
-            throw $e;
         } finally {
             if (!empty($tempcsvpath) && is_file($tempcsvpath)) {
                 @unlink($tempcsvpath);
             }
-            $this->release_lock($lock);
         }
     }
 
     /**
-     * Resolve configured CSV source.
+     * Returns a new set of zeroed counters.
      *
-     * Exactly one source must be configured:
-     * - local_csv_user_sync/csvpath
-     * - local_csv_user_sync/csvstoredfile
-     *
-     * @param \stdClass $config plugin config
-     * @param logger $logger logger instance
-     * @return array{filepath:string,temppath:?string}|null
+     * @return \stdClass
      */
-    private function resolve_csv_source(\stdClass $config, logger $logger): ?array {
-        $csvpath = trim((string)($config->csvpath ?? ''));
-        $storedfilepath = trim((string)($config->csvstoredfile ?? ''));
-
-        if ($csvpath !== '' && $storedfilepath !== '') {
-            $logger->error(get_string('error:csvsourceconflict', 'local_csv_user_sync'));
-            return null;
-        }
-
-        if ($csvpath === '' && $storedfilepath === '') {
-            $logger->error(get_string('error:csvsourcemissing', 'local_csv_user_sync'));
-            return null;
-        }
-
-        if ($csvpath !== '') {
-            return [
-                'filepath' => $csvpath,
-                'temppath' => null,
-            ];
-        }
-
-        $storedfile = $this->get_stored_csv_file($storedfilepath);
-        if ($storedfile === null) {
-            $logger->error(get_string('error:csvuploadnotfound', 'local_csv_user_sync'));
-            return null;
-        }
-
-        $tempfilepath = $storedfile->copy_content_to_temp('local_csv_user_sync', 'csvsync_');
-        if ($tempfilepath === false || !is_file($tempfilepath) || !is_readable($tempfilepath)) {
-            $logger->error(get_string('error:csvpathnotreadable', 'local_csv_user_sync', $storedfilepath));
-            return null;
-        }
-
-        return [
-            'filepath' => $tempfilepath,
-            'temppath' => $tempfilepath,
-        ];
+    private function new_counters(): \stdClass {
+        return (object)array_fill_keys(self::COUNTERS, 0);
     }
 
     /**

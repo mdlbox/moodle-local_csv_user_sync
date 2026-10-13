@@ -22,8 +22,6 @@
  * @license     http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
-defined('MOODLE_INTERNAL') || die();
-
 /**
  * Executes plugin upgrade steps.
  *
@@ -44,6 +42,16 @@ function xmldb_local_csv_user_sync_upgrade(int $oldversion): bool {
         }
 
         upgrade_plugin_savepoint(true, 2026022600, 'local', 'csv_user_sync');
+    }
+
+    if ($oldversion < 2026101300) {
+        // Existing installations keep the username-only matching they were using until an admin changes it:
+        // switching silently to username + email matching could create suffixed duplicates of existing users.
+        if (get_config('local_csv_user_sync', 'matchmode') === false) {
+            set_config('matchmode', 'username', 'local_csv_user_sync');
+        }
+
+        upgrade_plugin_savepoint(true, 2026101300, 'local', 'csv_user_sync');
     }
 
     return true;
