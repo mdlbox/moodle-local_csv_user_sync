@@ -387,7 +387,8 @@ class enrol_sync {
             return null;
         }
 
-        $formats = ['Y-m-d|', 'd.m.Y|', 'd/m/Y|'];
+        // $formats = ['Y-m-d|', 'd.m.Y|', 'd/m/Y|'];
+        $formats = ['Y-m-d|', 'd.m.Y|', 'd/m/Y|', 'd-m-Y|']; //added new date format
         foreach ($formats as $format) {
             $date = \DateTimeImmutable::createFromFormat($format, $value);
             if (!$date instanceof \DateTimeImmutable) {
