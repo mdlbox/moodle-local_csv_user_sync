@@ -24,6 +24,8 @@
 
 require_once(__DIR__ . '/../../config.php');
 require_once($CFG->dirroot . '/user/profile/lib.php');
+require_once(__DIR__ . '/classes/local/user_deletion.php');
+require_once(__DIR__ . '/classes/local/user_sync.php');
 
 require_login();
 require_sesskey();
@@ -66,7 +68,16 @@ foreach (profile_get_custom_fields() as $field) {
 }
 sort($customheaders, SORT_NATURAL | SORT_FLAG_CASE);
 
-$headers = array_merge($corefields, $enrolfields, $customheaders);
+// Account suspension and deletion columns are only offered when the administrator enabled them.
+$lifecyclefields = [];
+if (get_config('local_csv_user_sync', 'usersuspendenabled')) {
+    $lifecyclefields[] = \local_csv_user_sync\local\user_sync::SUSPEND_COLUMN;
+}
+if (get_config('local_csv_user_sync', 'userdeleteenabled')) {
+    $lifecyclefields[] = \local_csv_user_sync\local\user_deletion::COLUMN;
+}
+
+$headers = array_merge($corefields, $lifecyclefields, $enrolfields, $customheaders);
 $commentrow = array_fill(0, count($headers), '');
 $row = array_fill(0, count($headers), '');
 $map = array_flip($headers);
@@ -78,6 +89,14 @@ $commentrow[$map['enrol_start_date']] = get_string('template:datehintrequired', 
 $commentrow[$map['enrol_end_date']] = get_string('template:datehintoptional', 'local_csv_user_sync');
 $commentrow[$map['suspended']] = get_string('template:suspendedhint', 'local_csv_user_sync');
 $commentrow[$map['deleted']] = get_string('template:deletedhint', 'local_csv_user_sync');
+if (isset($map[\local_csv_user_sync\local\user_sync::SUSPEND_COLUMN])) {
+    $commentrow[$map[\local_csv_user_sync\local\user_sync::SUSPEND_COLUMN]] =
+        get_string('template:usersuspendhint', 'local_csv_user_sync');
+}
+if (isset($map[\local_csv_user_sync\local\user_deletion::COLUMN])) {
+    $commentrow[$map[\local_csv_user_sync\local\user_deletion::COLUMN]] =
+        get_string('template:userdeletehint', 'local_csv_user_sync');
+}
 
 $row[$map['username']] = 'demo.user';
 $row[$map['firstname']] = 'Demo';

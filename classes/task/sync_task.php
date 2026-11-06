@@ -34,6 +34,7 @@ use local_csv_user_sync\local\csv_reader;
 use local_csv_user_sync\local\enrol_sync;
 use local_csv_user_sync\local\folder_source;
 use local_csv_user_sync\local\logger;
+use local_csv_user_sync\local\user_deletion;
 use local_csv_user_sync\local\user_sync;
 
 /**
@@ -48,6 +49,9 @@ class sync_task extends \core\task\scheduled_task {
 
     /** @var int Moodle file itemid used for uploaded CSV source file. */
     private const CSV_ITEMID = 0;
+
+    /** @var bool True when a row failed with an unexpected error during the current run. */
+    private bool $unexpectederror = false;
 
     /** @var string[] Counter names. */
     private const COUNTERS = ['rows', 'userscreated', 'usersupdated', 'enrolmentscreated', 'enrolmentsupdated', 'errors'];
@@ -79,9 +83,11 @@ class sync_task extends \core\task\scheduled_task {
         $runid = substr(hash('sha256', microtime(true) . ':' . random_int(1000, 9999)), 0, 16);
         $logger = new logger($runid, !empty($config->detailedlog), $dryrun);
         $failedsources = [];
+        $this->unexpectederror = false;
+        $runstart = microtime(true);
 
         try {
-            $logger->info(get_string('task:start', 'local_csv_user_sync', $dryrun ? get_string('yes') : get_string('no')));
+            $logger->summary(get_string('task:start', 'local_csv_user_sync', $dryrun ? get_string('yes') : get_string('no')));
 
             $sources = $this->collect_sources($config, $logger);
             if (empty($sources)) {
@@ -89,6 +95,12 @@ class sync_task extends \core\task\scheduled_task {
             }
 
             $defaultauth = trim((string)($config->defaultauth ?? 'manual'));
+            $deletion = new user_deletion($logger, [
+                'enabled' => !empty($config->userdeleteenabled),
+                'max' => (int)($config->userdeletemax ?? user_deletion::DEFAULT_MAX),
+                'dryrun' => $dryrun,
+                'notifyemail' => (string)($config->conflictemail ?? ''),
+            ]);
             $usersync = new user_sync($logger, [
                 'dryrun' => $dryrun,
                 'updateonlychanged' => !isset($config->updateonlychanged) || !empty($config->updateonlychanged),
@@ -97,10 +109,12 @@ class sync_task extends \core\task\scheduled_task {
                 'emailtemplate' => (string)($config->emailtemplate ?? ''),
                 'matchmode' => (string)($config->matchmode ?? user_sync::MATCH_USERNAME_EMAIL),
                 'emptyvalues' => (string)($config->emptyvalues ?? user_sync::EMPTY_IGNORE),
-            ]);
+                'suspendenabled' => !empty($config->usersuspendenabled),
+            ], $deletion);
             $enrolsync = new enrol_sync($logger, [
                 'dryrun' => $dryrun,
                 'allowedroles' => $config->allowedroles ?? null,
+                'sourcecourseid' => (int)($config->sourcecourseid ?? 0),
             ]);
             $notifier = new conflict_notifier($logger, (string)($config->conflictemail ?? ''), $dryrun);
 
@@ -116,7 +130,7 @@ class sync_task extends \core\task\scheduled_task {
                 $starttime = microtime(true);
                 $counters = $this->new_counters();
                 try {
-                    $this->process_source($source, $config, $logger, $usersync, $enrolsync, $notifier, $counters);
+                    $this->process_source($source, $config, $logger, $usersync, $enrolsync, $notifier, $deletion, $counters);
                 } catch (\Throwable $e) {
                     $counters->errors++;
                     $failedsources[] = $source['label'];
@@ -135,12 +149,21 @@ class sync_task extends \core\task\scheduled_task {
             }
 
             $totals->sources = $total;
-            $logger->info(get_string('task:summary', 'local_csv_user_sync', $totals));
+            $logger->summary(get_string('task:summary', 'local_csv_user_sync', $totals));
             $notifier->send();
+
+            // Deletions are executed once every source has been read, all or none (see user_deletion).
+            // An incomplete run (a source stopped by an unexpected error) never deletes accounts.
+            if ((!empty($failedsources) || $this->unexpectederror) && $deletion->count() > 0) {
+                $logger->error(get_string('error:userdeleteincompleterun', 'local_csv_user_sync', $deletion->count()));
+            } else {
+                $deletion->execute();
+            }
         } catch (\Throwable $e) {
-            $logger->error(get_string('task:fatal', 'local_csv_user_sync', $this->readable_exception_message($e)));
+            $logger->summary(get_string('task:fatal', 'local_csv_user_sync', $this->readable_exception_message($e)), 'error');
             throw $e;
         } finally {
+            $this->log_end($logger, $runstart);
             $this->release_lock($lock);
         }
 
@@ -148,6 +171,34 @@ class sync_task extends \core\task\scheduled_task {
             // Report the failure to the task manager once every source has been attempted.
             throw new \moodle_exception('task:sourcesfailed', 'local_csv_user_sync', '', implode(', ', $failedsources));
         }
+    }
+
+    /**
+     * Writes the final line of the run: outcome and duration.
+     *
+     * @param logger $logger
+     * @param float $starttime run start, from microtime(true)
+     * @return void
+     */
+    private function log_end(logger $logger, float $starttime): void {
+        $a = (object)[
+            'duration' => format_float(microtime(true) - $starttime, 2),
+            'errors' => $logger->get_count('error'),
+            'warnings' => $logger->get_count('warning'),
+        ];
+        if ($a->errors > 0) {
+            [$level, $identifier] = ['error', 'task:endfailure'];
+        } else if ($a->warnings > 0) {
+            [$level, $identifier] = ['warning', 'task:endwarnings'];
+        } else {
+            [$level, $identifier] = ['info', 'task:endsuccess'];
+        }
+
+        $message = get_string($identifier, 'local_csv_user_sync', $a);
+        if ($level !== 'info' && !$logger->is_detailed()) {
+            $message .= ' ' . get_string('task:enddetailshint', 'local_csv_user_sync');
+        }
+        $logger->summary($message, $level);
     }
 
     /**
@@ -216,6 +267,7 @@ class sync_task extends \core\task\scheduled_task {
      * @param user_sync $usersync
      * @param enrol_sync $enrolsync
      * @param conflict_notifier $notifier
+     * @param user_deletion $deletion
      * @param \stdClass $counters counters for this source, updated in place
      * @return void
      */
@@ -226,10 +278,14 @@ class sync_task extends \core\task\scheduled_task {
         user_sync $usersync,
         enrol_sync $enrolsync,
         conflict_notifier $notifier,
+        user_deletion $deletion,
         \stdClass $counters
     ): void {
         $dryrun = !empty($config->dryrun);
         $tempcsvpath = null;
+        // Deletions require a CSV author holding moodle/user:delete. A file path on the server has no Moodle author
+        // to check (it may be written by an external system), so it can never request deletions.
+        $candelete = false;
 
         try {
             if ($source['type'] === 'path') {
@@ -240,6 +296,26 @@ class sync_task extends \core\task\scheduled_task {
                     if (folder_source::is_exposed($source['cm'])) {
                         $logger->warning(get_string('warning:folderexposed', 'local_csv_user_sync', $source['label']));
                     }
+                    $readers = folder_source::get_untrusted_readers($source['cm']);
+                    if (!empty($readers)) {
+                        $listed = array_slice($readers, 0, 20);
+                        if (count($readers) > count($listed)) {
+                            $listed[] = '...';
+                        }
+                        $logger->warning(get_string('warning:folderreaders', 'local_csv_user_sync', (object)[
+                            'source' => $source['label'],
+                            'count' => count($readers),
+                            'users' => implode(', ', $listed),
+                        ]));
+                    }
+                    $openmethods = folder_source::get_open_access_methods($source['cm']);
+                    if (!empty($openmethods)) {
+                        $names = array_map(fn($method) => get_string('pluginname', 'enrol_' . $method), $openmethods);
+                        $logger->warning(get_string('warning:folderopenaccess', 'local_csv_user_sync', (object)[
+                            'source' => $source['label'],
+                            'methods' => implode(', ', $names),
+                        ]));
+                    }
                     $rejected = false;
                     $storedfile = folder_source::get_csv_file($source['cm'], $logger, $rejected);
                     if ($storedfile === null) {
@@ -249,6 +325,13 @@ class sync_task extends \core\task\scheduled_task {
                         return;
                     }
                     $logger->info(get_string('task:sourcefile', 'local_csv_user_sync', $storedfile->get_filename()));
+                }
+
+                // Deletion rows need moodle/user:delete in system context for the file author and, for folders,
+                // for everyone able to manage the folder files.
+                $candelete = user_deletion::author_can_delete((int)$storedfile->get_userid());
+                if ($candelete && $source['type'] === 'folder') {
+                    $candelete = empty(folder_source::get_untrusted_managers($source['cm'], user_deletion::CAPABILITY));
                 }
 
                 $tempcsvpath = $storedfile->copy_content_to_temp('local_csv_user_sync', 'csvsync_');
@@ -286,6 +369,23 @@ class sync_task extends \core\task\scheduled_task {
                 $row = $entry['data'];
 
                 try {
+                    // Rows requesting a deletion are only queued: no create, update or enrolment.
+                    $deleterequest = user_deletion::parse_flag($row, user_deletion::COLUMN);
+                    if ($deleterequest === null) {
+                        $counters->errors++;
+                        $logger->error(get_string('error:invalidflag', 'local_csv_user_sync', (object)[
+                            'field' => user_deletion::COLUMN,
+                            'value' => trim((string)$row[user_deletion::COLUMN]),
+                        ]), $rownum);
+                        continue;
+                    }
+                    if ($deleterequest) {
+                        if (!$deletion->request($row, $rownum, $source['label'], $candelete)) {
+                            $counters->errors++;
+                        }
+                        continue;
+                    }
+
                     $userresult = $usersync->sync($row, $rownum);
                     if (!empty($userresult['conflict'])) {
                         $notifier->add(
@@ -330,6 +430,8 @@ class sync_task extends \core\task\scheduled_task {
                     }
                 } catch (\Throwable $e) {
                     $counters->errors++;
+                    // An unexpected error makes the run incomplete: no account is deleted at the end.
+                    $this->unexpectederror = true;
                     $logger->error(
                         get_string('task:rowfatal', 'local_csv_user_sync', (object)[
                             'row' => $rownum,

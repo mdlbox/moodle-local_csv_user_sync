@@ -337,6 +337,116 @@ final class user_sync_test extends \advanced_testcase {
     }
 
     /**
+     * A changed email or authentication method closes the open sessions of the account.
+     */
+    public function test_credentials_change_closes_sessions(): void {
+        global $DB;
+
+        $this->getDataGenerator()->create_user([
+            'username' => 'test.user', 'email' => 'test.user@example.com', 'firstname' => 'Test', 'lastname' => 'User',
+        ]);
+        $sync = $this->get_sync(['matchmode' => user_sync::MATCH_USERNAME]);
+        $this->sync_row($sync, ['username' => 'test.user', 'email' => 'changed@example.com']);
+
+        $message = get_string('log:usersessionsclosed', 'local_csv_user_sync', 'test.user');
+        $logged = fn() => $DB->get_fieldset_select('local_csv_user_sync_log', 'message', 'runid = ?', ['phpunit']);
+        $this->assertContains($message, $logged());
+
+        // Unchanged credentials: no session is closed.
+        $DB->delete_records('local_csv_user_sync_log');
+        $this->sync_row($sync, ['username' => 'test.user', 'email' => 'changed@example.com', 'city' => 'Lugano']);
+        $this->assertNotContains($message, $logged());
+    }
+
+    /**
+     * The user_suspend column suspends and reactivates accounts only when enabled.
+     */
+    public function test_user_suspend_column(): void {
+        $user = $this->getDataGenerator()->create_user([
+            'username' => 'test.user', 'email' => 'test.user@example.com', 'firstname' => 'Test', 'lastname' => 'User',
+        ]);
+        $row = ['username' => 'test.user', 'email' => 'test.user@example.com'];
+
+        // Disabled: the column is ignored.
+        $this->sync_row($this->get_sync(), $row + [user_sync::SUSPEND_COLUMN => '1']);
+        $this->assertSame('0', (string)$this->get_user('test.user')->suspended);
+
+        $result = $this->sync_row($this->get_sync(['suspendenabled' => true]), $row + [user_sync::SUSPEND_COLUMN => '1']);
+        $this->assertSame('updated', $result['status']);
+        $this->assertSame('1', (string)$this->get_user('test.user')->suspended);
+
+        // Empty keeps the account as is.
+        $result = $this->sync_row($this->get_sync(['suspendenabled' => true]), $row + [user_sync::SUSPEND_COLUMN => '']);
+        $this->assertSame('unchanged', $result['status']);
+        $this->assertSame('1', (string)$this->get_user('test.user')->suspended);
+
+        $this->sync_row($this->get_sync(['suspendenabled' => true]), $row + [user_sync::SUSPEND_COLUMN => '0']);
+        $this->assertSame('0', (string)\core_user::get_user($user->id)->suspended);
+    }
+
+    /**
+     * Each account access email sent is recorded in the Moodle log; accounts that cannot log in get none.
+     */
+    public function test_account_email_is_logged(): void {
+        $emails = $this->redirectEmails();
+        $events = $this->redirectEvents();
+
+        $result = $this->sync_row($this->get_sync(['sendemail' => true]), [
+            'username' => 'test.user', 'email' => 'test.user@example.com',
+        ]);
+        $this->sync_row($this->get_sync(['sendemail' => true]), [
+            'username' => 'locked.user', 'email' => 'locked.user@example.com', 'auth' => 'nologin',
+        ]);
+
+        $logged = array_values(array_filter(
+            $events->get_events(),
+            fn($event) => $event instanceof \local_csv_user_sync\event\account_email_sent
+        ));
+        $this->assertSame(1, $emails->count());
+        $this->assertCount(1, $logged);
+        $this->assertSame($result['userid'], (int)$logged[0]->relateduserid);
+        $emails->close();
+        $events->close();
+    }
+
+    /**
+     * A new account created suspended receives no access email.
+     */
+    public function test_new_suspended_user_gets_no_email(): void {
+        $sink = $this->redirectEmails();
+        $result = $this->sync_row($this->get_sync(['suspendenabled' => true, 'sendemail' => true]), [
+            'username' => 'test.user', 'email' => 'test.user@example.com', user_sync::SUSPEND_COLUMN => '1',
+        ]);
+        $this->assertSame(0, $sink->count());
+        $sink->close();
+
+        $this->assertSame('created', $result['status']);
+        $this->assertSame('1', (string)$this->get_user('test.user')->suspended);
+    }
+
+    /**
+     * Rows of an account requested for deletion in the same run are skipped.
+     */
+    public function test_rows_of_account_pending_deletion_are_skipped(): void {
+        $this->getDataGenerator()->create_user([
+            'username' => 'test.user', 'email' => 'test.user@example.com', 'firstname' => 'Test', 'lastname' => 'User',
+        ]);
+        $logger = new logger('phpunit', true, false);
+        $deletion = new user_deletion($logger, ['enabled' => true, 'max' => 10]);
+        $row = ['username' => 'test.user', 'email' => 'test.user@example.com'];
+        ob_start();
+        $deletion->request($row, 2, 'test', true);
+        ob_end_clean();
+
+        $sync = new user_sync($logger, ['matchmode' => user_sync::MATCH_USERNAME_EMAIL, 'updateonlychanged' => true], $deletion);
+        $result = $this->sync_row($sync, $row + ['city' => 'Lugano']);
+
+        $this->assertSame('skipped', $result['status']);
+        $this->assertNull($result['userid']);
+        $this->assertNotSame('Lugano', $this->get_user('test.user')->city);
+    }
+
+    /**
      * Site administrators are never modified.
      */
     public function test_site_admin_is_protected(): void {

@@ -203,8 +203,9 @@ class csv_reader {
      */
     private function normalize_header(string $header): string {
         $header = core_text::strtolower(trim($header));
-        $header = preg_replace('/[\s\-]+/', '_', $header);
-        $header = preg_replace('/[^a-z0-9_]/', '', $header);
+        // UTF-8 mode: \s must not match single bytes of multibyte characters (see logger::sanitize_log_message()).
+        $header = preg_replace('/[\s\-]+/u', '_', $header) ?? $header;
+        $header = preg_replace('/[^a-z0-9_]/u', '', $header) ?? $header;
         return trim((string)$header, '_');
     }
 

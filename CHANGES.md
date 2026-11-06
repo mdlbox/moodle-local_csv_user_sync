@@ -2,6 +2,109 @@
 
 All notable changes to `local_csv_user_sync`.
 
+## 0.3.5 (2026110400)
+
+### Changed
+
+- Without `Detailed logging`, a run only logs its start, the totals, the outcome and the duration: for example
+  "Synchronization finished successfully in 0.58 s." or "Synchronization finished with errors in 0.58 s.
+  Errors: 2. Warnings: 1.". Per-source, per-row, warning and error lines are only written with detailed logging;
+  previously only debug lines were hidden.
+
+## 0.3.4 (2026110301)
+
+### Fixed
+
+- The warning about untrusted readers of a source folder listed almost every account of the site, because
+  authenticated users hold `mod/folder:view`. It now lists only users who can actually read the files: active
+  enrolments or `moodle/course:view`, `moodle/course:viewhiddencourses` when the source course is hidden,
+  `moodle/course:viewhiddenactivities` when the folder is hidden, and availability restrictions. Suspended
+  accounts are excluded.
+- A new warning is logged when the course and the folder are visible and the course allows guest access or self
+  enrolment, since then any user can read the CSV files.
+
+## 0.3.3 (2026110300)
+
+### Fixed
+
+- Log messages containing accented characters broke on servers whose
+  locale is not UTF-8 the whitespace cleanup removed one byte
+  of the character, the plugin log line was not saved and the scheduled task was marked as failed because
+  Moodle could not store its output. Messages are now handled as UTF-8. CSV headers are normalized the same way.
+
+## 0.3.2 (2026110200)
+
+### Security
+
+- Open sessions of an account are closed when a CSV row changes its email or authentication method.
+- CSV enrolments never target the site front page or the course holding the source folders (enrolling someone
+  there could give them rights on the CSV files).
+- A warning lists the untrusted users who can read the CSV files of a source folder: users with
+  `mod/folder:view`, plus `moodle/course:viewhiddenactivities` when the folder is hidden (for example non-editing
+  teachers).
+
+### Fixed
+
+- Disabled manual enrolment instances are no longer used: enrolments in them gave no access and no error was
+  reported. A course with only disabled manual instances now reports an error, and no extra instance is created.
+  Removing an enrolment (`deleted = 1`) from a disabled instance still works.
+- An error while preparing the manual enrolment instance now only fails that row; previously it made the whole
+  run incomplete and blocked the requested account deletions.
+
+## 0.3.1 (2026103001)
+
+### Added
+
+- Each account access email sent to a new user is recorded in the Moodle logs with the new event
+  `\local_csv_user_sync\event\account_email_sent` ("Account access email sent", visible in Reports → Logs),
+  and always in the plugin log (previously only with detailed logging). The event never stores the email content.
+
+### Security
+
+- When the account access email fails, core records the whole message, including the one-time password setup
+  link, in its `email_failed` event: the plugin now invalidates that link immediately. The user can still request
+  a new one with "Forgotten password".
+
+### Changed
+
+- No access email is attempted for `nologin` accounts or when `$CFG->noemailever` is set (a warning is logged
+  instead of reporting an email that was never sent).
+
+## 0.3.0 (2026103000)
+
+### Added
+
+- **Account suspension** with the `user_suspend` column: `1` suspends the account and logs the user out, `0`
+  reactivates it, empty keeps it as is. Disabled by default (`Allow account suspension`). A new account created
+  suspended receives no access email.
+- **Account deletion** with the `user_delete` column, through the core `delete_user()` API. Disabled by default
+  (`Allow account deletion`).
+  - Only an existing account whose username and email both match the row exactly is deleted, in every matching
+    mode; suffixed accounts are never considered.
+  - Protected accounts are never deleted: site administrators (whatever their authentication method), guest,
+    and accounts holding `moodle/user:update` or `local/csv_user_sync:uploadsource` in system context.
+  - The CSV author must hold `moodle/user:delete` in system context; for Folder sources, every user able to manage
+    the folder files must hold it too. A file path source can never request deletions.
+  - Deletion rows are queued and executed at the end of the run. Later rows for the same account in the run are
+    skipped.
+  - `Maximum deletions per run` (default 10): above it no account is deleted and the site administrators are
+    warned by email.
+  - No deletion is executed when a source or a row stopped with an unexpected error.
+  - Right before deleting, the account must still be unprotected and keep the same username and email.
+  - Summary email of deleted accounts after each run; dry-run only logs.
+- Both columns are added to the downloadable CSV template only when enabled.
+- Enrolment dates also accept the `DD-MM-YYYY` format (for example `20-10-2026`).
+
+### Changed
+
+- The `Email conflict notification address` setting is now the `Notification address` and also receives the
+  account deletion emails, which are always sent to the site administrators as well.
+- Privacy metadata updated for deletion notification emails.
+
+### Upgrade notes
+
+- No database change. The new settings are disabled: behaviour is unchanged until an administrator enables them.
+
 ## 0.2.0 (2026101300)
 
 ### Added

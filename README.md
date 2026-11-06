@@ -18,6 +18,8 @@ It supports user creation and updates, enrolment creation/update/removal, dry-ru
 - Matches accounts on the username + email pair, with numeric username suffixes for homonyms (configurable).
 - Configurable handling of empty CSV values (ignore, default, or clear).
 - Email conflict detection (`allowaccountssameemail`) with a summary email to administrators or a configured address.
+- Optional account suspension (`user_suspend`) and deletion (`user_delete`) columns, disabled by default, with a
+  per-run deletion limit and email summaries.
 - Supports configurable delimiter and encoding (`UTF-8`, `ISO-8859-1`, `Windows-1252`, `auto`).
 - Validates CSV structure and required headers before processing.
 - Supports Moodle custom profile fields from CSV.
@@ -39,6 +41,11 @@ It supports user creation and updates, enrolment creation/update/removal, dry-ru
 2. Visit:
    - `Site administration -> Notifications`
 3. Complete database upgrade if prompted.
+
+### Upgrading from 0.2.x
+
+- Replace the plugin files and visit `Site administration -> Notifications`. There is no database change.
+- The new account suspension and deletion settings are disabled: nothing changes until an administrator enables them.
 
 ### Upgrading from 0.1.x
 
@@ -112,6 +119,19 @@ CSV files contain personal data and control accounts and enrolments. Therefore:
   modified by a CSV row (like site administrators), so a CSV cannot change their email or authentication.
 - Hide the source folders from participants (a warning is logged when a selected folder is visible), and do not
   enrol students in the source course.
+- Hiding is not enough for everyone: users with `moodle/course:viewhiddenactivities` (for example non-editing
+  teachers) can still download the files, as can course backups and the folder ZIP download. Each run logs a
+  warning listing the untrusted users able to read a source folder: users who can enter the course (active
+  enrolment, or `moodle/course:view`) and see the folder (`moodle/course:viewhiddencourses` when the course is
+  hidden, `moodle/course:viewhiddenactivities` when the folder is hidden, availability restrictions on groups or
+  profile fields). Restrictions on dates are not evaluated. A separate warning is logged when the course and the
+  folder are visible and the course allows guest access or self enrolment. Keep only the users who manage the CSV
+  files in the source course; hiding the whole source course is a simple way to keep students out.
+- CSV enrolments never target the source course nor the site front page.
+- Retention: processed and ignored CSV files stay in the folder until someone deletes them. Remove old files
+  once they are no longer needed.
+- Do not select folders restored from a backup with user data: the restored files keep their original authors,
+  and the author check would trust them.
 
 ### 2) Account Matching
 
@@ -141,7 +161,7 @@ Email already used by another account:
 
 - if `allowaccountssameemail` is enabled, the account is created normally;
 - if it is disabled (Moodle default), the row is skipped, logged as an error, and listed in a single summary email
-  sent at the end of the run to `Email conflict notification address`, or to all site administrators when empty.
+  sent at the end of the run to `Notification address`, or to all site administrators when empty.
   No email is sent in dry-run mode.
 
 Protected accounts: site administrators, the guest user and deleted accounts are never modified.
@@ -164,7 +184,9 @@ mode, and falls back to the default method in clear mode. For new users empty va
 ### 5) Authentication and New User Email
 
 - `Default authentication method`: used when CSV `auth` is empty or invalid.
-- `Send credentials email`: for newly created users.
+- `Send credentials email`: for newly created users. Each email sent is recorded in the Moodle logs
+  (Reports → Logs, event "Account access email sent"); failed emails appear as the core "Email failed" event.
+  Suspended and `nologin` accounts receive no email.
 - `Email template`: supports placeholders:
   - `{{firstname}}`
   - `{{lastname}}`
@@ -178,8 +200,50 @@ mode, and falls back to the default method in clear mode. For new users empty va
 ### 6) Sync Behavior
 
 - `Update only changed data`
-- `Detailed logging`
+- `Detailed logging`: when enabled, every step is logged (sources, files, rows, users, enrolments, warnings and
+  errors). When disabled, the task output and the plugin log only contain the start, the totals, the outcome
+  (success, success with warnings, or errors, with their counts) and the duration of each run. Summary emails
+  (conflicts, deletions) and the Moodle log events are not affected.
 - `Dry-run mode`
+
+### 7) Account Suspension and Deletion
+
+Two optional columns act on the whole Moodle account. They are different from the enrolment columns `suspended`
+and `deleted`, which only act on the course enrolment. Both are **disabled by default** and can only be enabled
+by a site administrator in the plugin settings.
+
+`user_suspend` (setting `Allow account suspension`):
+
+- `1` suspends the account and logs the user out (same as the core user upload tool);
+- `0` reactivates the account;
+- empty: no change.
+- Suspension is reversible and keeps grades and history. A new account created suspended receives no access email.
+
+`user_delete` (setting `Allow account deletion`):
+
+- `1` requests the deletion of the account; `0` or empty: nothing.
+- Only an existing account whose username **and** email match the row exactly (email case-insensitive) is deleted,
+  in every matching mode. Suffixed accounts (`username1`...) are never considered.
+- Protected accounts are never deleted: site administrators (whatever their authentication method), the guest
+  user, and accounts holding `moodle/user:update` or `local/csv_user_sync:uploadsource` in system context.
+- The author of the CSV must hold `moodle/user:delete` in system context. For Folder sources, every user able to
+  manage the folder files must hold it too. A file path source has no Moodle author to check (the file may be
+  written by an external system), so it can **never** request deletions: use an uploaded file or a folder.
+- A row requesting a deletion is only queued: it never creates, updates or enrols. **Later** rows for the same
+  account in the same run are skipped. Earlier rows have already been applied; the account is deleted anyway at
+  the end of the run.
+- Deletions are executed **at the end of the run**, after every source has been read, with the core
+  `delete_user()` API. This is irreversible: enrolments, role assignments, groups, cohorts and grades are removed.
+- `Maximum deletions per run` (default 10): if a run requests more deletions, **none** is executed and the site
+  administrators are warned by email. `0` blocks every deletion.
+- If a source or a row stops with an unexpected error, no deletion is executed in that run.
+- Right before deleting, the account is checked again: it must still be unprotected and keep the same username
+  and email.
+- After each run with deletions, a summary email listing the deleted accounts is sent to the site administrators
+  and to the `Notification address` (when set).
+- Dry-run mode only logs the deletions that would be executed, and sends no email.
+
+Both columns appear in the downloadable CSV template only when the corresponding setting is enabled.
 
 ## CSV Format
 
@@ -235,6 +299,9 @@ Enrolment headers must be paired:
 - `suspended` (`0` or `1`, empty treated as `0`)
 - `deleted` (`0` or `1`, empty treated as `0`)
 
+These two columns act on the course enrolment only. For the whole account see `user_suspend` and `user_delete`
+in "Account Suspension and Deletion".
+
 ### Custom profile fields
 
 Two ways are accepted:
@@ -259,6 +326,7 @@ Custom fields are written both when a user is created and when it is updated, th
 - `Y-m-d` (example `2026-02-18`)
 - `d.m.Y` (example `18.02.2026`)
 - `d/m/Y` (example `18/02/2026`)
+- `d-m-Y` (example `18-02-2026`)
 - `YYYYMMDD` (example `20260218`)
 - Unix timestamp (seconds, 10 digits)
 - Unix timestamp (milliseconds, 13 digits)
@@ -284,6 +352,8 @@ Enrolment logic highlights:
 - If role changes, plugin enforces exactly one manual role assignment for that instance.
 
 If a manual enrolment instance is missing on a target course, the plugin creates one (unless dry-run).
+Disabled manual instances are never used: if a course only has disabled manual instances, the row is reported as
+an error and no instance is created (removing an enrolment with `deleted = 1` still works).
 
 ## Security Notes
 
@@ -296,6 +366,7 @@ If a manual enrolment instance is missing on a target course, the plugin creates
 - New user:
   - It sends a one-time password setup/reset URL (`{{setpasswordurl}}`) when supported by user auth.
   - Falls back to login URL when reset links are not available.
+  - If the email fails, the one-time link is invalidated (core logs the failed message content).
 - Exception messages are sanitized before persistent logging to reduce sensitive path leakage.
 - Folder sources: files are read only through the File API, and only when uploaded by a user holding
   `local/csv_user_sync:uploadsource` in system context (see "Folder sources security").

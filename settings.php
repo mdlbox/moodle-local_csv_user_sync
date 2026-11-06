@@ -28,6 +28,12 @@ require_once(__DIR__ . '/classes/local/admin_setting_csvpath.php');
 require_once(__DIR__ . '/classes/local/admin_setting_csvstoredfile.php');
 require_once(__DIR__ . '/classes/local/admin_setting_sourcecourse.php');
 require_once(__DIR__ . '/classes/local/admin_setting_sourcefolders.php');
+// Classes whose constants are used below. Settings are loaded on every admin page, also before the upgrade
+// that refreshes the class map cache: load them explicitly so a plugin update never breaks the admin pages.
+require_once(__DIR__ . '/classes/local/enrol_sync.php');
+require_once(__DIR__ . '/classes/local/folder_source.php');
+require_once(__DIR__ . '/classes/local/user_deletion.php');
+require_once(__DIR__ . '/classes/local/user_sync.php');
 
 if ($hassiteconfig) {
     $settings = new admin_settingpage(
@@ -234,6 +240,35 @@ if ($hassiteconfig) {
         get_string('settings:dryrun', 'local_csv_user_sync'),
         get_string('settings:dryrun_desc', 'local_csv_user_sync'),
         0
+    ));
+
+    $settings->add(new admin_setting_heading(
+        'local_csv_user_sync/lifecyclesection',
+        get_string('settings:lifecyclesection', 'local_csv_user_sync'),
+        get_string('settings:lifecyclesection_desc', 'local_csv_user_sync')
+    ));
+
+    $settings->add(new admin_setting_configcheckbox(
+        'local_csv_user_sync/usersuspendenabled',
+        get_string('settings:usersuspendenabled', 'local_csv_user_sync'),
+        get_string('settings:usersuspendenabled_desc', 'local_csv_user_sync'),
+        0
+    ));
+
+    $settings->add(new admin_setting_configcheckbox(
+        'local_csv_user_sync/userdeleteenabled',
+        get_string('settings:userdeleteenabled', 'local_csv_user_sync'),
+        get_string('settings:userdeleteenabled_desc', 'local_csv_user_sync'),
+        0
+    ));
+
+    $settings->add(new admin_setting_configtext(
+        'local_csv_user_sync/userdeletemax',
+        get_string('settings:userdeletemax', 'local_csv_user_sync'),
+        get_string('settings:userdeletemax_desc', 'local_csv_user_sync'),
+        \local_csv_user_sync\local\user_deletion::DEFAULT_MAX,
+        PARAM_INT,
+        6
     ));
 
     $taskurl = new moodle_url('/admin/tool/task/scheduledtasks.php');

@@ -55,6 +55,9 @@ class enrol_sync {
     /** @var int[]|null Ids of roles assignable in course context, loaded on first use. */
     private ?array $courseroleids = null;
 
+    /** @var array<int,bool> Courses whose manual enrolment instances are all disabled. */
+    private array $disabledmanual = [];
+
     /**
      * Constructor.
      *
@@ -129,19 +132,43 @@ class enrol_sync {
             return ['status' => 'error'];
         }
 
-        $instance = $this->get_or_create_manual_instance((int)$course->id, (string)$course->shortname);
-        if (!$instance) {
+        // The site front page and the course holding the source folders are never managed by a CSV:
+        // enrolling someone in the source course could give them rights on the CSV files.
+        if ($this->is_excluded_course($course)) {
+            $this->logger->error(get_string('error:courseexcluded', 'local_csv_user_sync', $course->shortname), $rownum, $userid);
+            return ['status' => 'error'];
+        }
+
+        try {
+            $instance = $this->get_or_create_manual_instance((int)$course->id, (string)$course->shortname);
+        } catch (\Throwable $e) {
+            // An enrolment problem affects this row only: it must not make the whole run incomplete.
             $this->logger->error(
-                get_string('error:manualenrolmissing', 'local_csv_user_sync', $course->shortname),
+                get_string('error:enrolfailed', 'local_csv_user_sync', logger::sanitize_exception_message($e)),
                 $rownum,
                 $userid
             );
             return ['status' => 'error'];
         }
+        if (!$instance && $deleted) {
+            // Removing an enrolment is still possible from a disabled manual instance.
+            $existingmanual = $this->find_existing_manual_enrolment((int)$course->id, $userid, true);
+            $instance = $existingmanual['instance'] ?? null;
+            if (!$instance) {
+                $params = (object)['userid' => $userid, 'course' => $course->shortname];
+                $this->logger->debug(get_string('log:enroldeleteabsent', 'local_csv_user_sync', $params), $rownum, $userid);
+                return ['status' => 'unchanged'];
+            }
+        }
+        if (!$instance) {
+            $errorkey = isset($this->disabledmanual[(int)$course->id]) ? 'error:manualenroldisabled' : 'error:manualenrolmissing';
+            $this->logger->error(get_string($errorkey, 'local_csv_user_sync', $course->shortname), $rownum, $userid);
+            return ['status' => 'error'];
+        }
 
         $existingue = $DB->get_record('user_enrolments', ['enrolid' => $instance->id, 'userid' => $userid]);
         if (!$existingue) {
-            $existingmanual = $this->find_existing_manual_enrolment((int)$course->id, $userid);
+            $existingmanual = $this->find_existing_manual_enrolment((int)$course->id, $userid, $deleted);
             if ($existingmanual !== null) {
                 $instance = $existingmanual['instance'];
                 $existingue = $existingmanual['userenrolment'];
@@ -387,8 +414,7 @@ class enrol_sync {
             return null;
         }
 
-        // $formats = ['Y-m-d|', 'd.m.Y|', 'd/m/Y|'];
-        $formats = ['Y-m-d|', 'd.m.Y|', 'd/m/Y|', 'd-m-Y|']; //added new date format
+        $formats = ['Y-m-d|', 'd.m.Y|', 'd/m/Y|', 'd-m-Y|'];
         foreach ($formats as $format) {
             $date = \DateTimeImmutable::createFromFormat($format, $value);
             if (!$date instanceof \DateTimeImmutable) {
@@ -523,7 +549,21 @@ class enrol_sync {
     }
 
     /**
-     * Get or create a manual enrolment instance for a course.
+     * Returns true for courses a CSV may never enrol into: the site front page and the source folders course.
+     *
+     * @param stdClass $course
+     * @return bool
+     */
+    private function is_excluded_course(stdClass $course): bool {
+        $sourcecourseid = (int)($this->config['sourcecourseid'] ?? 0);
+        return (int)$course->id === (int)SITEID || ($sourcecourseid > 0 && (int)$course->id === $sourcecourseid);
+    }
+
+    /**
+     * Get or create an enabled manual enrolment instance for a course.
+     *
+     * A disabled manual instance is never used: enrolments in it would give no access. When a course only has
+     * disabled manual instances, null is returned (the administrator disabled manual enrolment on purpose).
      *
      * @param int $courseid
      * @param string $courseshortname
@@ -536,11 +576,21 @@ class enrol_sync {
             return $this->instancecache[$courseid];
         }
 
+        $hasdisabled = false;
         foreach (enrol_get_instances($courseid, false) as $instance) {
-            if ($instance->enrol === 'manual') {
+            if ($instance->enrol !== 'manual') {
+                continue;
+            }
+            if ((int)$instance->status === ENROL_INSTANCE_ENABLED) {
                 $this->instancecache[$courseid] = $instance;
                 return $instance;
             }
+            $hasdisabled = true;
+        }
+        if ($hasdisabled) {
+            $this->disabledmanual[$courseid] = true;
+            $this->instancecache[$courseid] = null;
+            return null;
         }
 
         if (!empty($this->config['dryrun'])) {
@@ -577,15 +627,21 @@ class enrol_sync {
     /**
      * Finds an existing manual user enrolment across manual instances in one course.
      *
+     * Disabled instances are only considered to remove an enrolment (deleted = 1).
+     *
      * @param int $courseid
      * @param int $userid
+     * @param bool $includedisabled
      * @return array{instance:stdClass,userenrolment:stdClass}|null
      */
-    private function find_existing_manual_enrolment(int $courseid, int $userid): ?array {
+    private function find_existing_manual_enrolment(int $courseid, int $userid, bool $includedisabled): ?array {
         global $DB;
 
         foreach (enrol_get_instances($courseid, false) as $candidate) {
             if ($candidate->enrol !== 'manual') {
+                continue;
+            }
+            if (!$includedisabled && (int)$candidate->status !== ENROL_INSTANCE_ENABLED) {
                 continue;
             }
 

@@ -237,19 +237,96 @@ class folder_source {
     }
 
     /**
-     * Returns usernames of users who can manage the folder files without holding the upload capability
-     * in system context (site administrators are always trusted).
+     * Returns usernames of untrusted users who can actually read the folder files (and so the personal data in the CSV).
+     *
+     * Only users who can enter the course are considered: active enrolments, or moodle/course:view without enrolment
+     * (for example managers). They also need mod/folder:view, moodle/course:viewhiddencourses when the course is hidden
+     * and moodle/course:viewhiddenactivities when the folder is hidden (for example non-editing teachers), and must
+     * pass the availability restrictions that apply to user lists (for example groups). Site administrators, suspended
+     * accounts and holders of the upload capability in system context are excluded. Guest access and self enrolment
+     * are reported separately by {@see get_open_access_methods()}.
      *
      * @param cm_info $cm
      * @return string[]
      */
-    public static function get_untrusted_managers(cm_info $cm): array {
+    public static function get_untrusted_readers(cm_info $cm): array {
+        $course = $cm->get_course();
+        $coursecontext = \context_course::instance((int)$course->id);
+        $systemcontext = context_system::instance();
+        $fields = 'u.id, u.username, u.suspended';
+
+        $candidates = get_enrolled_users($cm->context, 'mod/folder:view', 0, $fields, null, 0, 0, true);
+        $candidates += get_users_by_capability($coursecontext, 'moodle/course:view', $fields);
+
+        $readers = [];
+        foreach ($candidates as $candidate) {
+            $userid = (int)$candidate->id;
+            if (!empty($candidate->suspended) || is_siteadmin($userid)) {
+                continue;
+            }
+            if (has_capability(self::UPLOADCAPABILITY, $systemcontext, $userid)) {
+                continue;
+            }
+            if (!has_capability('mod/folder:view', $cm->context, $userid)) {
+                continue;
+            }
+            if (empty($course->visible) && !has_capability('moodle/course:viewhiddencourses', $coursecontext, $userid)) {
+                continue;
+            }
+            if (empty($cm->visible) && !has_capability('moodle/course:viewhiddenactivities', $cm->context, $userid)) {
+                continue;
+            }
+            $readers[$userid] = $candidate;
+        }
+        $readers = (new \core_availability\info_module($cm))->filter_user_list($readers);
+
+        $usernames = array_map(fn($reader) => (string)$reader->username, array_values($readers));
+        sort($usernames);
+
+        return $usernames;
+    }
+
+    /**
+     * Returns the names of the enabled enrolment methods that let any user read the folder files:
+     * guest access and self enrolment open to new enrolments, when both the course and the folder are visible.
+     *
+     * @param cm_info $cm
+     * @return string[] enrolment plugin names, for example 'guest'
+     */
+    public static function get_open_access_methods(cm_info $cm): array {
+        $course = $cm->get_course();
+        if (empty($course->visible) || empty($cm->visible)) {
+            return [];
+        }
+
+        $methods = [];
+        foreach (enrol_get_instances((int)$course->id, true) as $instance) {
+            // Self enrolment instances that do not accept new enrolments (customint6) are not open.
+            $open = $instance->enrol === 'guest' || ($instance->enrol === 'self' && !empty($instance->customint6));
+            if ($open) {
+                $methods[$instance->enrol] = (string)$instance->enrol;
+            }
+        }
+        ksort($methods);
+
+        return array_values($methods);
+    }
+
+    /**
+     * Returns usernames of users who can manage the folder files without holding a capability
+     * in system context (site administrators are always trusted).
+     *
+     * @param cm_info $cm
+     * @param string $capability capability required in system context, the upload capability by default
+     * @return string[]
+     */
+    public static function get_untrusted_managers(cm_info $cm, string $capability = self::UPLOADCAPABILITY): array {
         $systemcontext = context_system::instance();
         $managers = get_users_by_capability($cm->context, 'mod/folder:managefiles', 'u.id, u.username');
 
         $untrusted = [];
         foreach ($managers as $manager) {
-            if (!is_siteadmin((int)$manager->id) && !has_capability(self::UPLOADCAPABILITY, $systemcontext, (int)$manager->id)) {
+            if (!is_siteadmin((int)$manager->id) && !has_capability($capability, $systemcontext, (int)$manager->id)) {
                 $untrusted[] = (string)$manager->username;
             }
         }
