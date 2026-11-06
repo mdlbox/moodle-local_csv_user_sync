@@ -131,6 +131,76 @@ final class sync_task_test extends \advanced_testcase {
     }
 
     /**
+     * Deletions requested in a folder are executed at the end of the run; later rows for the account are skipped.
+     */
+    public function test_user_delete_column(): void {
+        set_config('userdeleteenabled', 1, 'local_csv_user_sync');
+        set_config('userdeletemax', 5, 'local_csv_user_sync');
+        $user = $this->getDataGenerator()->create_user(['username' => 'test.user', 'email' => 'test.user@example.com']);
+        $kept = $this->getDataGenerator()->create_user(['username' => 'kept.user', 'email' => 'kept.user@example.com']);
+        $first = $this->create_folder_with_csv(
+            "username;firstname;lastname;email;user_delete\n" .
+            "test.user;Test;User;test.user@example.com;1\n" .
+            "kept.user;Kept;User;someone.else@example.org;1\n"
+        );
+        $second = $this->create_folder_with_csv(
+            "username;firstname;lastname;email;city\n" .
+            "test.user;Test;User;test.user@example.com;Lugano\n"
+        );
+        set_config('sourcefolders', implode(',', [$first->cmid, $second->cmid]), 'local_csv_user_sync');
+
+        $sink = $this->redirectEmails();
+        $this->run_task();
+        $sink->close();
+
+        $this->assertNotEmpty(\core_user::get_user($user->id)->deleted);
+        // The email does not match exactly: the account is kept.
+        $this->assertEmpty(\core_user::get_user($kept->id)->deleted);
+    }
+
+    /**
+     * A folder whose files can be managed by a user without moodle/user:delete cannot request deletions,
+     * while its other rows are still processed.
+     */
+    public function test_user_delete_refused_when_a_folder_manager_cannot_delete(): void {
+        set_config('userdeleteenabled', 1, 'local_csv_user_sync');
+        $user = $this->getDataGenerator()->create_user(['username' => 'test.user', 'email' => 'test.user@example.com']);
+        $folder = $this->create_folder_with_csv(
+            "username;firstname;lastname;email;user_delete\n" .
+            "test.user;Test;User;test.user@example.com;1\n" .
+            "other.user;Other;User;other.user@example.com;\n"
+        );
+        set_config('sourcefolders', $folder->cmid, 'local_csv_user_sync');
+
+        // A teacher of the source course who may provide CSV files, but not delete accounts.
+        $teacher = $this->getDataGenerator()->create_and_enrol($this->course, 'editingteacher');
+        $roleid = $this->getDataGenerator()->create_role();
+        assign_capability(folder_source::UPLOADCAPABILITY, CAP_ALLOW, $roleid, \context_system::instance()->id);
+        role_assign($roleid, $teacher->id, \context_system::instance()->id);
+        accesslib_clear_all_caches_for_unit_testing();
+
+        $this->run_task();
+
+        $this->assertEmpty(\core_user::get_user($user->id)->deleted);
+        $this->assertNotFalse(\core_user::get_user_by_username('other.user'));
+    }
+
+    /**
+     * A file path source can never request deletions.
+     */
+    public function test_user_delete_refused_for_file_path_source(): void {
+        set_config('userdeleteenabled', 1, 'local_csv_user_sync');
+        $user = $this->getDataGenerator()->create_user(['username' => 'test.user', 'email' => 'test.user@example.com']);
+        $path = make_request_directory() . '/users.csv';
+        file_put_contents($path, "username;firstname;lastname;email;user_delete\ntest.user;Test;User;test.user@example.com;1\n");
+        set_config('csvpath', $path, 'local_csv_user_sync');
+
+        $this->run_task();
+
+        $this->assertEmpty(\core_user::get_user($user->id)->deleted);
+    }
+
+    /**
      * Nothing is written and no email is sent in dry-run mode.
      */
     public function test_dry_run_writes_nothing(): void {

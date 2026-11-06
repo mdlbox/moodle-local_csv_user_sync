@@ -47,6 +47,9 @@ class user_sync {
     /** @var string Empty CSV values clear existing values. */
     public const EMPTY_CLEAR = 'clear';
 
+    /** @var string CSV column suspending (1) or reactivating (0) the account. */
+    public const SUSPEND_COLUMN = 'user_suspend';
+
     /** @var array<string,int> Maximum lengths of the user table columns written by this plugin. */
     private const FIELD_MAXLENGTH = [
         'username' => 100,
@@ -105,17 +108,24 @@ class user_sync {
         'deleted' => true,
         'start_date' => true,
         'end_date' => true,
+        user_deletion::COLUMN => true,
+        self::SUSPEND_COLUMN => true,
     ];
+
+    /** @var user_deletion|null Deletions requested in this run, rows for those accounts are skipped. */
+    private readonly ?user_deletion $deletion;
 
     /**
      * Constructor.
      *
      * @param logger $logger
      * @param array<string,mixed> $config
+     * @param user_deletion|null $deletion
      */
     public function __construct(
         logger $logger,
-        array $config
+        array $config,
+        ?user_deletion $deletion = null
     ) {
         global $CFG;
 
@@ -123,6 +133,7 @@ class user_sync {
         require_once($CFG->dirroot . '/user/profile/lib.php');
         $this->logger = $logger;
         $this->config = $config;
+        $this->deletion = $deletion;
 
         // CSV headers are normalized to lowercase, while profile field shortnames may contain uppercase letters.
         // Index fields by lowercase shortname and drop names that would be ambiguous.
@@ -216,7 +227,7 @@ class user_sync {
             $targetusername = $username;
         }
 
-        if ($existing !== null && $this->is_protected_account($existing)) {
+        if ($existing !== null && self::is_protected_account($existing)) {
             $this->logger->error(
                 get_string('error:protectedaccount', 'local_csv_user_sync', $targetusername),
                 $rownum,
@@ -224,6 +235,17 @@ class user_sync {
                 $targetusername
             );
             return $this->result('error', (int)$existing->id, false, $targetusername);
+        }
+
+        // An account requested for deletion in this run is not updated nor enrolled by other rows.
+        if ($existing !== null && $this->deletion !== null && $this->deletion->is_pending($targetusername)) {
+            $this->logger->warning(
+                get_string('warning:userdeletepending', 'local_csv_user_sync', $targetusername),
+                $rownum,
+                (int)$existing->id,
+                $targetusername
+            );
+            return $this->result('skipped', null, false, $targetusername);
         }
 
         $conflict = $this->find_email_conflict($email, $existing, $targetusername);
@@ -453,7 +475,42 @@ class user_sync {
             $data[$field] = $cleaned;
         }
 
+        $suspended = $this->get_suspend_value($row, $rownum, $username);
+        if ($suspended !== null) {
+            $data['suspended'] = $suspended;
+        }
+
         return $data;
+    }
+
+    /**
+     * Read the user_suspend column: "1" suspends the account, "0" reactivates it, empty keeps it as is.
+     *
+     * @param array<string,string> $row
+     * @param int $rownum
+     * @param string $username
+     * @return string|null "1", "0", or null when the account suspension must not change
+     */
+    private function get_suspend_value(array $row, int $rownum, string $username): ?string {
+        if (trim((string)($row[self::SUSPEND_COLUMN] ?? '')) === '') {
+            return null;
+        }
+
+        $flag = user_deletion::parse_flag($row, self::SUSPEND_COLUMN);
+        if ($flag === null) {
+            $this->logger->warning(get_string('error:invalidflag', 'local_csv_user_sync', (object)[
+                'field' => self::SUSPEND_COLUMN,
+                'value' => trim((string)$row[self::SUSPEND_COLUMN]),
+            ]), $rownum, null, $username);
+            return null;
+        }
+
+        if (empty($this->config['suspendenabled'])) {
+            $this->logger->warning(get_string('warning:usersuspenddisabled', 'local_csv_user_sync'), $rownum, null, $username);
+            return null;
+        }
+
+        return $flag ? '1' : '0';
     }
 
     /**
@@ -775,6 +832,10 @@ class user_sync {
                 $userid,
                 $username
             );
+            if (isset($record->suspended) && (string)$record->suspended !== (string)$existing->suspended) {
+                $suspendkey = (string)$record->suspended === '1' ? 'log:usersuspend_dryrun' : 'log:userreactivate_dryrun';
+                $this->logger->info(get_string($suspendkey, 'local_csv_user_sync', $username), $rownum, $userid, $username);
+            }
             return $this->result('updated', $userid, false, $username);
         }
 
@@ -785,6 +846,34 @@ class user_sync {
             $this->save_custom_fields($userid, $customtoapply);
             // One event for core and custom field changes, triggered once everything is saved.
             \core\event\user_updated::create_from_userid($userid)->trigger();
+
+            if (isset($record->suspended) && (string)$record->suspended !== (string)$existing->suspended) {
+                $suspendkey = 'log:userreactivated';
+                if ((string)$record->suspended === '1') {
+                    // Same as the core user upload tool: a suspended user is logged out immediately.
+                    \core\session\manager::destroy_user_sessions($userid);
+                    $suspendkey = 'log:usersuspended';
+                }
+                $this->logger->info(get_string($suspendkey, 'local_csv_user_sync', $username), $rownum, $userid, $username);
+            }
+
+            // A changed email or authentication method ends the open sessions: whoever was logged in with the
+            // previous identity must log in again.
+            $credentialschanged = false;
+            foreach (['email', 'auth'] as $field) {
+                if (isset($record->{$field}) && (string)$record->{$field} !== (string)$existing->{$field}) {
+                    $credentialschanged = true;
+                }
+            }
+            if ($credentialschanged && (string)($record->suspended ?? '') !== '1') {
+                \core\session\manager::destroy_user_sessions($userid);
+                $this->logger->info(
+                    get_string('log:usersessionsclosed', 'local_csv_user_sync', $username),
+                    $rownum,
+                    $userid,
+                    $username
+                );
+            }
 
             $this->logger->info(
                 get_string('log:userupdated', 'local_csv_user_sync', $username),
@@ -813,7 +902,7 @@ class user_sync {
      * @param stdClass $user
      * @return bool
      */
-    private function is_protected_account(stdClass $user): bool {
+    public static function is_protected_account(stdClass $user): bool {
         if (!empty($user->deleted) || isguestuser($user) || is_siteadmin((int)$user->id)) {
             return true;
         }
@@ -831,13 +920,27 @@ class user_sync {
      * @throws moodle_exception
      */
     private function send_credentials_email_if_enabled(int $userid): void {
-        global $SITE;
+        global $CFG, $DB, $SITE;
 
         if (empty($this->config['sendemail'])) {
             return;
         }
 
         $recipient = core_user::get_user($userid, '*', MUST_EXIST);
+        if (!empty($recipient->suspended) || $recipient->auth === 'nologin') {
+            // The account cannot log in: no access email is sent.
+            return;
+        }
+        if (!empty($CFG->noemailever)) {
+            // Emails are disabled for the whole site ($CFG->noemailever): nothing is sent, so nothing is logged as sent.
+            $this->logger->warning(
+                get_string('warning:emaildisabled', 'local_csv_user_sync', $recipient->username),
+                null,
+                $userid,
+                $recipient->username
+            );
+            return;
+        }
         $sender = core_user::get_support_user();
         $subject = get_string('email:newuser_subject', 'local_csv_user_sync', format_string($SITE->fullname));
         $template = trim((string)($this->config['emailtemplate'] ?? ''));
@@ -867,10 +970,15 @@ class user_sync {
         );
 
         if (!$sent) {
+            // On a mail server error, core logs the whole message (email_failed event), including the
+            // one-time link: invalidate it. The user can still request a new one with "Forgotten password".
+            $DB->delete_records('user_password_resets', ['userid' => $userid]);
             throw new moodle_exception('error:emailsendfailed', 'local_csv_user_sync', '', $recipient->username);
         }
 
-        $this->logger->debug(
+        // Moodle log (Reports > Logs) and plugin log.
+        \local_csv_user_sync\event\account_email_sent::create_for_user($userid)->trigger();
+        $this->logger->info(
             get_string('log:emailsent', 'local_csv_user_sync', $recipient->username),
             null,
             $userid,

@@ -26,8 +26,6 @@ declare(strict_types=1);
 
 namespace local_csv_user_sync\local;
 
-use core_user;
-
 /**
  * Collects email conflicts during one run and sends a single summary email at the end.
  */
@@ -122,13 +120,8 @@ class conflict_notifier {
             'conflicts' => implode("\n", $lines),
         ]);
 
-        $sender = core_user::get_noreply_user();
-        $sent = 0;
-        foreach ($this->get_recipients() as $recipient) {
-            if (email_to_user($recipient, $sender, $subject, $body, text_to_html(s($body)))) {
-                $sent++;
-            }
-        }
+        // Conflicts go to the configured address, or to the site administrators when none is configured.
+        $sent = notification_mailer::send($subject, $body, $this->recipientemail, false);
 
         if ($sent > 0) {
             $this->logger->info(get_string('log:conflictnotified', 'local_csv_user_sync', (object)[
@@ -138,27 +131,5 @@ class conflict_notifier {
         } else {
             $this->logger->error(get_string('error:conflictnotifyfailed', 'local_csv_user_sync'));
         }
-    }
-
-    /**
-     * Returns notification recipients: the configured address, or all site administrators.
-     *
-     * A configured address is not tied to an account, so the main administrator record is used
-     * as a carrier with the email overridden (same approach as core badges verification emails).
-     *
-     * @return \stdClass[]
-     */
-    private function get_recipients(): array {
-        if ($this->recipientemail !== '' && validate_email($this->recipientemail)) {
-            $admin = get_admin();
-            if (!$admin) {
-                return [];
-            }
-            $recipient = clone $admin;
-            $recipient->email = $this->recipientemail;
-            return [$recipient];
-        }
-
-        return array_values(get_admins());
     }
 }

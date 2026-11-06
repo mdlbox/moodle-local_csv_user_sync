@@ -177,6 +177,53 @@ final class folder_source_test extends \advanced_testcase {
     }
 
     /**
+     * Untrusted readers of a hidden folder are the users who can see hidden activities (for example teachers).
+     */
+    public function test_untrusted_readers(): void {
+        $course = $this->getDataGenerator()->create_course();
+        $teacher = $this->getDataGenerator()->create_and_enrol($course, 'teacher');
+        $this->getDataGenerator()->create_and_enrol($course, 'student');
+        $folder = $this->getDataGenerator()->create_module('folder', ['course' => $course->id, 'visible' => 0]);
+
+        // Not enrolled: authenticated users hold mod/folder:view, but cannot enter the course.
+        $this->getDataGenerator()->create_user();
+
+        $readers = folder_source::get_untrusted_readers($this->get_cm($folder));
+
+        $this->assertSame([(string)$teacher->username], $readers);
+    }
+
+    /**
+     * In a hidden course only users who can see hidden courses are readers, even of a visible folder.
+     */
+    public function test_untrusted_readers_of_hidden_course(): void {
+        $course = $this->getDataGenerator()->create_course(['visible' => 0]);
+        $teacher = $this->getDataGenerator()->create_and_enrol($course, 'teacher');
+        $this->getDataGenerator()->create_and_enrol($course, 'student');
+        $folder = $this->getDataGenerator()->create_module('folder', ['course' => $course->id]);
+
+        $this->assertSame([(string)$teacher->username], folder_source::get_untrusted_readers($this->get_cm($folder)));
+    }
+
+    /**
+     * Guest access is reported only when both the course and the folder are visible.
+     */
+    public function test_open_access_methods(): void {
+        global $DB;
+        $course = $this->getDataGenerator()->create_course();
+        $visible = $this->getDataGenerator()->create_module('folder', ['course' => $course->id]);
+        $hidden = $this->getDataGenerator()->create_module('folder', ['course' => $course->id, 'visible' => 0]);
+        $this->assertSame([], folder_source::get_open_access_methods($this->get_cm($visible)));
+
+        set_config('enrol_plugins_enabled', 'manual,guest,self');
+        $guest = $DB->get_record('enrol', ['courseid' => $course->id, 'enrol' => 'guest'], '*', MUST_EXIST);
+        $DB->set_field('enrol', 'status', ENROL_INSTANCE_ENABLED, ['id' => $guest->id]);
+
+        $this->assertSame(['guest'], folder_source::get_open_access_methods($this->get_cm($visible)));
+        $this->assertSame([], folder_source::get_open_access_methods($this->get_cm($hidden)));
+    }
+
+    /**
      * Folders are returned in course page order; ids that are not folders of the course are reported.
      */
     public function test_resolve_folders(): void {

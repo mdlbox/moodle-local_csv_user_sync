@@ -47,6 +47,9 @@ class logger {
     /** @var bool */
     private $tableexists = false;
 
+    /** @var array<string,int> Number of entries written per level, also when they are not displayed. */
+    private array $counts = ['info' => 0, 'debug' => 0, 'warning' => 0, 'error' => 0];
+
     /**
      * Constructor.
      *
@@ -73,6 +76,36 @@ class logger {
      */
     public function get_runid(): string {
         return $this->runid;
+    }
+
+    /**
+     * Writes a summary line: always displayed and stored, also without detailed logging.
+     *
+     * @param string $message
+     * @param string $level log level, info by default
+     * @return void
+     */
+    public function summary(string $message, string $level = 'info'): void {
+        $this->write($level, $message, null, null, null, true);
+    }
+
+    /**
+     * Returns the number of entries written with the given level during this run.
+     *
+     * @param string $level
+     * @return int
+     */
+    public function get_count(string $level): int {
+        return $this->counts[$level] ?? 0;
+    }
+
+    /**
+     * Returns true when detailed logging is enabled.
+     *
+     * @return bool
+     */
+    public function is_detailed(): bool {
+        return $this->detailedlog;
     }
 
     /**
@@ -130,11 +163,14 @@ class logger {
     /**
      * Writes one log entry.
      *
+     * Without detailed logging only summary lines are displayed and stored; the other entries are only counted.
+     *
      * @param string $level
      * @param string $message
      * @param int|null $rownum
      * @param int|null $userid
      * @param string|null $username
+     * @param bool $summary true for a summary line
      * @return void
      */
     private function write(
@@ -142,15 +178,17 @@ class logger {
         string $message,
         ?int $rownum = null,
         ?int $userid = null,
-        ?string $username = null
+        ?string $username = null,
+        bool $summary = false
     ): void {
         global $DB;
 
-        $message = self::sanitize_log_message($message);
-
-        if ($level === 'debug' && !$this->detailedlog) {
+        $this->counts[$level] = ($this->counts[$level] ?? 0) + 1;
+        if (!$summary && !$this->detailedlog) {
             return;
         }
+
+        $message = self::sanitize_log_message($message);
 
         $prefix = $this->dryrun ? '[local_csv_user_sync][dry-run]' : '[local_csv_user_sync]';
         $rowsuffix = $rownum !== null ? ' [row ' . $rownum . ']' : '';
@@ -204,10 +242,13 @@ class logger {
             return '';
         }
 
-        $message = preg_replace('/[\x00-\x1F\x7F]+/', ' ', $message) ?? $message;
-        $message = preg_replace('/(^|\s)[A-Za-z]:\\\\[^\s]+/', '$1[path]', $message) ?? $message;
-        $message = preg_replace('#(^|\s)/(?:[^/\s]+/)+[^/\s]*#', '$1[path]', $message) ?? $message;
-        $message = trim((string)(preg_replace('/\s+/', ' ', $message) ?? $message));
+        // Patterns are matched in UTF-8 mode: without it \s follows the server locale and, for example with
+        // Windows-1252, matches the second byte of "à" (0xC3 0xA0), producing invalid UTF-8 that the database rejects.
+        $message = fix_utf8($message);
+        $message = preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $message) ?? $message;
+        $message = preg_replace('/(^|\s)[A-Za-z]:\\\\[^\s]+/u', '$1[path]', $message) ?? $message;
+        $message = preg_replace('#(^|\s)/(?:[^/\s]+/)+[^/\s]*#u', '$1[path]', $message) ?? $message;
+        $message = trim((string)(preg_replace('/\s+/u', ' ', $message) ?? $message));
 
         if (core_text::strlen($message) > self::MAXMESSAGELENGTH) {
             $message = core_text::substr($message, 0, self::MAXMESSAGELENGTH) . '...';
